@@ -3,10 +3,20 @@ from datetime import datetime, timedelta, timezone
 import pytz
 import time
 import json
+import logging
+
+# --- Logging setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 region = 'eu-north-1'
 sns_topic_arn = 'arn:aws:sns:eu-north-1:135699253595:ScalingAlerts'
+load_balancer_name = 'app/ScalerALB/1136bc260d6235a6'
 
 ami_id = 'ami-0c1ac8a41498c1a9c'
 instance_type = 't3.micro'
@@ -17,48 +27,75 @@ target_group_arn = 'arn:aws:elasticloadbalancing:eu-north-1:135699253595:targetg
 primary_tag_key = 'Role'
 primary_tag_value = 'Primary'
 
-# --- Time setup ---
 uk_tz = pytz.timezone("Europe/London")
-end_time = datetime.now(timezone.utc)
-start_time = end_time - timedelta(minutes=5)
 
-# --- AWS Clients ---
 cloudwatch = boto3.client('cloudwatch', region_name=region)
 ec2 = boto3.client('ec2', region_name=region)
 sns = boto3.client('sns', region_name=region)
 elbv2 = boto3.client('elbv2', region_name=region)
 
-# --- SNS Alert ---
+# --- Functions ---
+
 def send_alert(subject, message):
     sns.publish(TopicArn=sns_topic_arn, Subject=subject, Message=message)
 
-# --- Get all running instances ---
-response = ec2.describe_instances(Filters=[
-    {'Name': 'instance-state-name', 'Values': ['running']}
-])
+def wait_for_instance_ok(instance_id, timeout=300, interval=15):
+    """Wait for instance status to be 'ok' and running"""
+    logger.info(f"Waiting for instance {instance_id} to be running and status OK...")
+    waiter = ec2.get_waiter('instance_running')
+    try:
+        waiter.wait(InstanceIds=[instance_id], WaiterConfig={'Delay': interval, 'MaxAttempts': int(timeout/interval)})
+    except Exception as e:
+        logger.error(f"Error waiting for instance to run: {e}")
+        return False
 
-all_running_instances = []
-primary_instances = []
+    # Now wait for system status checks to pass
+    for _ in range(int(timeout/interval)):
+        statuses = ec2.describe_instance_status(InstanceIds=[instance_id])
+        if statuses['InstanceStatuses']:
+            status = statuses['InstanceStatuses'][0]
+            sys_status = status['SystemStatus']['Status']
+            inst_status = status['InstanceStatus']['Status']
+            if sys_status == 'ok' and inst_status == 'ok':
+                logger.info(f"Instance {instance_id} is running and status OK.")
+                return True
+        time.sleep(interval)
 
-for reservation in response['Reservations']:
-    for instance in reservation['Instances']:
-        instance_id = instance['InstanceId']
-        all_running_instances.append(instance_id)
-        tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
-        if tags.get(primary_tag_key) == primary_tag_value:
-            primary_instances.append(instance_id)
+    logger.warning(f"Timeout waiting for instance {instance_id} status OK.")
+    return False
 
-if not all_running_instances:
-    print("No running instances detected. Exiting.")
-    exit()
+def wait_for_target_healthy(target_group_arn, instance_id, timeout=300, interval=15):
+    """Wait for an instance to show as healthy in the target group"""
+    logger.info(f"Waiting for instance {instance_id} to become healthy in target group...")
+    elapsed = 0
+    while elapsed < timeout:
+        response = elbv2.describe_target_health(TargetGroupArn=target_group_arn)
+        for target_desc in response['TargetHealthDescriptions']:
+            target = target_desc['Target']
+            state = target_desc['TargetHealth']['State']
+            if target['Id'] == instance_id and state == 'healthy':
+                logger.info(f"Instance {instance_id} is healthy in target group.")
+                return True
+        time.sleep(interval)
+        elapsed += interval
+    logger.warning(f"Timeout waiting for instance {instance_id} to become healthy.")
+    return False
 
-print(f"All running instances: {all_running_instances}")
-print(f"Primary (protected) instances: {primary_instances}")
+def get_running_instances():
+    response = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+    all_running_instances = []
+    primary_instances = []
 
-# --- Monitor CPU for all running instances ---
-cpu_per_instance = {}
+    for reservation in response['Reservations']:
+        for instance in reservation['Instances']:
+            instance_id = instance['InstanceId']
+            all_running_instances.append(instance_id)
+            tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+            if tags.get(primary_tag_key) == primary_tag_value:
+                primary_instances.append(instance_id)
+    return all_running_instances, primary_instances
 
-for instance_id in all_running_instances:
+def get_cpu_utilization(instance_id, start_time, end_time):
     metrics = cloudwatch.get_metric_statistics(
         Namespace='AWS/EC2',
         MetricName='CPUUtilization',
@@ -69,49 +106,82 @@ for instance_id in all_running_instances:
         Statistics=['Average']
     )
     datapoints = sorted(metrics['Datapoints'], key=lambda x: x['Timestamp'])
-
     if datapoints:
         avg_cpu = sum(p['Average'] for p in datapoints) / len(datapoints)
         timestamp_uk = datapoints[-1]['Timestamp'].astimezone(uk_tz)
-        print(f"Instance {instance_id} - Timestamp (UK): {timestamp_uk.strftime('%Y-%m-%d %H:%M:%S')}, Avg CPU: {avg_cpu:.2f}%")
-        cpu_per_instance[instance_id] = avg_cpu
+        logger.info(f"Instance {instance_id} - Timestamp (UK): {timestamp_uk.strftime('%Y-%m-%d %H:%M:%S')}, Avg CPU: {avg_cpu:.2f}%")
+        return avg_cpu
     else:
-        print(f"No CPU data for instance {instance_id}. Assuming 0%.")
-        cpu_per_instance[instance_id] = 0.0
+        logger.info(f"No CPU data for instance {instance_id}. Assuming 0%.")
+        return 0.0
 
-# --- Calculate overall average ---
-overall_avg_cpu = sum(cpu_per_instance.values()) / len(cpu_per_instance)
-print(f"\nOverall average CPU utilization: {overall_avg_cpu:.2f}%")
+def scale_up(cpu_average):
+    logger.info("SCALE UP triggered. Checking for stopped instances.")
+    send_alert("SCALE UP Triggered", f"High CPU ({cpu_average:.2f}%).")
 
-# --- Thresholds ---
-threshold_high = 70
-threshold_low = 20
+    stopped_response = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['stopped']}])
+    stopped_instances = [i['InstanceId'] for r in stopped_response['Reservations'] for i in r['Instances']]
 
-# --- SCALING LOGIC ---
-if overall_avg_cpu > threshold_high:
-    print("SCALE UP triggered. Checking for stopped instances.")
-    send_alert("SCALE UP Triggered", f"High CPU ({overall_avg_cpu:.2f}%).")
+    user_data_script = '''#!/bin/bash
+cd /home/ubuntu
 
-    # Check for stopped instances
-    stopped_response = ec2.describe_instances(
-        Filters=[{'Name': 'instance-state-name', 'Values': ['stopped']}]
-    )
-    stopped_instances = [
-        i['InstanceId']
-        for r in stopped_response['Reservations']
-        for i in r['Instances']
-    ]
+# Update and install dependencies
+apt update -y
+apt install -y python3-venv
+
+# Set up virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install Flask inside the venv
+/home/ubuntu/venv/bin/pip install flask
+
+# Create Flask app
+cat > app.py <<EOF
+from flask import Flask
+import time
+
+app = Flask(__name__)
+
+@app.route("/health")
+def health_check():
+    return "OK", 200
+
+@app.route("/")
+def cpu_burner():
+    start = time.time()
+    while time.time() - start < 0.5:
+        pass
+    return "CPU-intensive response"
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=80)
+EOF
+
+# Run Flask app in background
+nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > output.log 2>&1 &
+'''
 
     if stopped_instances:
         to_start = stopped_instances[0]
-        print(f"Starting stopped instance: {to_start}")
+        logger.info(f"Starting stopped instance: {to_start}")
         ec2.start_instances(InstanceIds=[to_start])
-        time.sleep(30)
-        elbv2.register_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': to_start, 'Port': 80}])
-        print(f"Registered {to_start} with target group.")
+        if wait_for_instance_ok(to_start):
+            # Register immediately after running
+            elbv2.register_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': to_start, 'Port': 80}])
+            logger.info(f"Registered {to_start} with target group.")
+            # Then wait for target to become healthy
+            if wait_for_target_healthy(target_group_arn, to_start):
+                logger.info(f"Instance {to_start} is healthy and ready.")
+            else:
+                logger.warning(f"Instance {to_start} failed to become healthy in target group.")
+            return to_start
+        else:
+            logger.warning(f"Instance {to_start} not healthy, skipping registration.")
+            return None
     else:
-        print("No stopped instances found. Launching new instance.")
-        ec2.run_instances(
+        logger.info("No stopped instances found. Launching new instance.")
+        response = ec2.run_instances(
             ImageId=ami_id,
             InstanceType=instance_type,
             KeyName=key_name,
@@ -121,35 +191,53 @@ if overall_avg_cpu > threshold_high:
             TagSpecifications=[{
                 'ResourceType': 'instance',
                 'Tags': [{'Key': 'Purpose', 'Value': 'ScaledInstance'}]
-            }]
+            }],
+            UserData=user_data_script
         )
-        print("Launched new instance (will require manual setup for HTTP server).")
+        new_instance_id = response['Instances'][0]['InstanceId']
+        logger.info(f"Launched new instance: {new_instance_id}")
 
-elif overall_avg_cpu < threshold_low:
-    # Choose only instances that are NOT primary
+        if wait_for_instance_ok(new_instance_id):
+            # Register before waiting for health
+            elbv2.register_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': new_instance_id, 'Port': 80}])
+            logger.info(f"Registered {new_instance_id} with target group.")
+            if wait_for_target_healthy(target_group_arn, new_instance_id):
+                logger.info(f"Instance {new_instance_id} is healthy and ready.")
+            else:
+                logger.warning(f"Instance {new_instance_id} failed to become healthy in target group.")
+            return new_instance_id
+        else:
+            logger.warning(f"Instance {new_instance_id} did not become healthy in time. Skipping target registration.")
+            return None
+
+def scale_down(cpu_average, all_running_instances, primary_instances):
     candidates_to_stop = [i for i in all_running_instances if i not in primary_instances]
     if candidates_to_stop:
         instance_to_stop = candidates_to_stop[-1]
-        print(f"SCALE DOWN: Stopping {instance_to_stop}")
+        logger.info(f"SCALE DOWN: Stopping {instance_to_stop}")
         elbv2.deregister_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': instance_to_stop, 'Port': 80}])
         ec2.stop_instances(InstanceIds=[instance_to_stop])
-        send_alert("SCALE DOWN Triggered", f"Low CPU ({overall_avg_cpu:.2f}%). Stopped {instance_to_stop}.")
+        send_alert("SCALE DOWN Triggered", f"Low CPU ({cpu_average:.2f}%). Stopped {instance_to_stop}.")
     else:
-        print("No non-primary instances to stop. Skipping.")
+        logger.info("No non-primary instances to stop. Skipping.")
         send_alert("SCALE DOWN Skipped", "Only primary instances are running.")
 
-else:
-    print("NO SCALING – CPU usage within acceptable range.")
+def get_healthy_instance_ids(target_group_arn):
+    response = elbv2.describe_target_health(TargetGroupArn=target_group_arn)
+    healthy_ids = [
+        target['Target']['Id']
+        for target in response['TargetHealthDescriptions']
+        if target['TargetHealth']['State'] == 'healthy'
+    ]
+    return healthy_ids
 
-# --- Update CloudWatch Dashboard ---
-def update_dashboard(instances_cpu_dict):
+def update_dashboard(instance_ids):
     widgets = []
     width = 6
     height = 6
     x, y = 0, 0
 
-    # Per-instance CPU widgets
-    for instance_id in instances_cpu_dict:
+    for instance_id in instance_ids:
         widget = {
             "type": "metric",
             "x": x,
@@ -164,7 +252,7 @@ def update_dashboard(instances_cpu_dict):
                 "period": 60,
                 "stat": "Average",
                 "region": region,
-                "yAxis": {"left": {"min": 0, "max": 100}},
+                "yAxis": {"left": {"min": 0, "max": 100}}
             }
         }
         widgets.append(widget)
@@ -173,7 +261,7 @@ def update_dashboard(instances_cpu_dict):
             x = 0
             y += height
 
-    # Combined graph for all instances
+    # Overall CPU widget
     avg_widget = {
         "type": "metric",
         "x": 0,
@@ -183,7 +271,7 @@ def update_dashboard(instances_cpu_dict):
         "properties": {
             "metrics": [
                 ["AWS/EC2", "CPUUtilization", "InstanceId", instance_id]
-                for instance_id in instances_cpu_dict
+                for instance_id in instance_ids
             ],
             "title": "Overall CPU (All Instances)",
             "period": 60,
@@ -196,46 +284,26 @@ def update_dashboard(instances_cpu_dict):
     }
     widgets.append(avg_widget)
 
-    # --- Load Balancer Metrics ---
-    elb_widgets = [
-        {
-            "type": "metric",
-            "x": 0,
-            "y": y + height * 2,
-            "width": 12,
-            "height": 6,
-            "properties": {
-                "title": "ELB Request Count",
-                "region": region,
-                "metrics": [
-                    ["AWS/ApplicationELB", "RequestCount", "TargetGroup", target_group_arn.split(":")[-1], "LoadBalancer", "app/my-load-balancer/50dc6c495c0c9188"]
-                ],
-                "stat": "Sum",
-                "period": 60,
-                "view": "timeSeries",
-                "yAxis": {"left": {"min": 0}}
-            }
-        },
-        {
-            "type": "metric",
-            "x": 12,
-            "y": y + height * 2,
-            "width": 12,
-            "height": 6,
-            "properties": {
-                "title": "ELB Latency",
-                "region": region,
-                "metrics": [
-                    ["AWS/ApplicationELB", "Latency", "TargetGroup", target_group_arn.split(":")[-1], "LoadBalancer", "app/ScalerALB/79a143b1b78c4513"]
-                ],
-                "stat": "Average",
-                "period": 60,
-                "view": "timeSeries",
-                "yAxis": {"left": {"min": 0}}
-            }
+    # ELB Request Count widget
+    elb_widget = {
+        "type": "metric",
+        "x": 0,
+        "y": y + height * 2,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": "ELB Request Count",
+            "region": region,
+            "metrics": [
+                ["AWS/ApplicationELB", "RequestCount", "TargetGroup", target_group_arn.split(":")[-1], "LoadBalancer", load_balancer_name]
+            ],
+            "stat": "Sum",
+            "period": 60,
+            "view": "timeSeries",
+            "yAxis": {"left": {"min": 0}}
         }
-    ]
-    widgets.extend(elb_widgets)
+    }
+    widgets.append(elb_widget)
 
     dashboard_body = {
         "widgets": widgets
@@ -245,8 +313,47 @@ def update_dashboard(instances_cpu_dict):
         DashboardName='AutoScalingMonitoring',
         DashboardBody=json.dumps(dashboard_body)
     )
-    print("✅ CloudWatch dashboard updated.")
+    logger.info(f"✅ CloudWatch dashboard updated for instances: {instance_ids}")
 
-# Call dashboard updater
-update_dashboard(cpu_per_instance)
+# --- Main run logic ---
+def main():
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(minutes=5)
 
+    all_running_instances, primary_instances = get_running_instances()
+
+    if not all_running_instances:
+        logger.warning("No running instances detected. Exiting.")
+        return
+
+    logger.info(f"All running instances: {all_running_instances}")
+    logger.info(f"Primary (protected) instances: {primary_instances}")
+
+    cpu_per_instance = {}
+    for instance_id in all_running_instances:
+        cpu_per_instance[instance_id] = get_cpu_utilization(instance_id, start_time, end_time)
+
+    overall_avg_cpu = sum(cpu_per_instance.values()) / len(cpu_per_instance)
+    logger.info(f"Overall average CPU utilization: {overall_avg_cpu:.2f}%")
+
+    threshold_high = 60
+    threshold_low = 20
+
+    if overall_avg_cpu > threshold_high:
+        new_instance_id = scale_up(overall_avg_cpu)
+        if new_instance_id:
+            cpu_per_instance[new_instance_id] = 0.0
+    elif overall_avg_cpu < threshold_low:
+        scale_down(overall_avg_cpu, all_running_instances, primary_instances)
+    else:
+        logger.info("NO SCALING – CPU usage within acceptable range.")
+
+    healthy_instance_ids = get_healthy_instance_ids(target_group_arn)
+
+    if healthy_instance_ids:
+        update_dashboard(healthy_instance_ids)
+    else:
+        logger.warning("⚠️ No healthy instances found in target group.")
+
+if __name__ == "__main__":
+    main()
