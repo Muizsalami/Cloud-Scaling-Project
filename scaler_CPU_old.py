@@ -115,41 +115,38 @@ def get_cpu_utilization(instance_id, start_time, end_time):
         logger.info(f"No CPU data for instance {instance_id}. Assuming 0%.")
         return 0.0
 
-# --- New custom metric publishing functions ---
-
 def publish_scaling_metric(action, instance_id):
-    cloudwatch.put_metric_data(
-        Namespace='AutoScalingProject',
-        MetricData=[
-            {
-                'MetricName': 'ScalingEvent',
-                'Dimensions': [
-                    {'Name': 'Action', 'Value': action},
-                    {'Name': 'InstanceId', 'Value': instance_id}
-                ],
-                'Timestamp': datetime.now(timezone.utc),
-                'Value': 1,
-                'Unit': 'Count'
-            }
-        ]
+    logger.info(f"Publishing scaling metric: Action={action}, InstanceId={instance_id}")
+    
+    response = cloudwatch.put_metric_data(
+        Namespace='AutoScalingMonitoring',  # Ensure this matches the dashboard's namespace
+        MetricData=[{
+            'MetricName': 'ScalingEvent',
+            'Dimensions': [
+                {'Name': 'Action', 'Value': action},
+                {'Name': 'InstanceId', 'Value': instance_id}
+            ],
+            'Timestamp': datetime.now(timezone.utc),
+            'Value': 1,  # For scaling events, this will be 1 for each scale-up or scale-down
+            'Unit': 'Count'
+        }]
     )
-    logger.info(f"Published scaling metric: {action} for instance {instance_id}")
+    
+    logger.info(f"Successfully published scaling metric: {action} for instance {instance_id}")
+    logger.debug(f"CloudWatch Response: {response}")  # Log the full response from CloudWatch
+
 
 def publish_running_instances_metric(count):
     cloudwatch.put_metric_data(
-        Namespace='AutoScalingProject',
-        MetricData=[
-            {
-                'MetricName': 'RunningInstances',
-                'Timestamp': datetime.now(timezone.utc),
-                'Value': count,
-                'Unit': 'Count'
-            }
-        ]
+        Namespace='AutoScalingMonitoring',
+        MetricData=[{
+            'MetricName': 'RunningInstances',
+            'Timestamp': datetime.now(timezone.utc),
+            'Value': count,
+            'Unit': 'Count'
+        }]
     )
     logger.info(f"Published running instances count: {count}")
-
-# --- Scaling functions updated with publishing ---
 
 def scale_up(cpu_average):
     logger.info("SCALE UP triggered. Checking for stopped instances.")
@@ -160,23 +157,14 @@ def scale_up(cpu_average):
 
     user_data_script = '''#!/bin/bash
 cd /home/ubuntu
-
-# Update and install dependencies
 apt update -y
 apt install -y python3-venv
-
-# Set up virtual environment
 python3 -m venv venv
 source venv/bin/activate
-
-# Install Flask inside the venv
 /home/ubuntu/venv/bin/pip install flask
-
-# Create Flask app
 cat > app.py <<EOF
 from flask import Flask
 import time
-
 app = Flask(__name__)
 
 @app.route("/health")
@@ -193,8 +181,6 @@ def cpu_burner():
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=80)
 EOF
-
-# Run Flask app in background
 nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > output.log 2>&1 &
 '''
 
@@ -202,17 +188,25 @@ nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > output.log 2>&1 &
         to_start = stopped_instances[0]
         logger.info(f"Starting stopped instance: {to_start}")
         ec2.start_instances(InstanceIds=[to_start])
-        if wait_for_instance_ok(to_start):
-            elbv2.register_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': to_start, 'Port': 80}])
-            logger.info(f"Registered {to_start} with target group.")
-            if wait_for_target_healthy(target_group_arn, to_start):
-                logger.info(f"Instance {to_start} is healthy and ready.")
-            else:
-                logger.warning(f"Instance {to_start} failed to become healthy in target group.")
+
+        # Wait for 45 seconds after instance launch before proceeding with health check
+        logger.info(f"Waiting for 45 seconds for instance {to_start} to initialize...")
+        time.sleep(45)
+
+        # Proceed directly with health check
+        elbv2.register_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': to_start, 'Port': 80}])
+        logger.info(f"Registered {to_start} with target group.")
+
+        # Perform health check on the target group to check if the instance is healthy
+        if wait_for_target_healthy(target_group_arn, to_start):
+            logger.info(f"Instance {to_start} is healthy and ready.")
             publish_scaling_metric("ScaleUp", to_start)
+            # Publish running instances metric immediately after scale-up
+            all_running_instances, _ = get_running_instances()
+            publish_running_instances_metric(len(all_running_instances))
             return to_start
         else:
-            logger.warning(f"Instance {to_start} not healthy, skipping registration.")
+            logger.warning(f"Instance {to_start} failed to become healthy in target group.")
             return None
     else:
         logger.info("No stopped instances found. Launching new instance.")
@@ -232,18 +226,26 @@ nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > output.log 2>&1 &
         new_instance_id = response['Instances'][0]['InstanceId']
         logger.info(f"Launched new instance: {new_instance_id}")
 
-        if wait_for_instance_ok(new_instance_id):
-            elbv2.register_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': new_instance_id, 'Port': 80}])
-            logger.info(f"Registered {new_instance_id} with target group.")
-            if wait_for_target_healthy(target_group_arn, new_instance_id):
-                logger.info(f"Instance {new_instance_id} is healthy and ready.")
-            else:
-                logger.warning(f"Instance {new_instance_id} failed to become healthy in target group.")
+        # Wait for 45 seconds after instance launch before proceeding with health check
+        logger.info(f"Waiting for 45 seconds for instance {new_instance_id} to initialize...")
+        time.sleep(45)
+
+        # Proceed directly with health check
+        elbv2.register_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': new_instance_id, 'Port': 80}])
+        logger.info(f"Registered {new_instance_id} with target group.")
+
+        # Perform health check on the target group to check if the instance is healthy
+        if wait_for_target_healthy(target_group_arn, new_instance_id):
+            logger.info(f"Instance {new_instance_id} is healthy and ready.")
             publish_scaling_metric("ScaleUp", new_instance_id)
+            # Publish running instances metric immediately after scale-up
+            all_running_instances, _ = get_running_instances()
+            publish_running_instances_metric(len(all_running_instances))
             return new_instance_id
         else:
-            logger.warning(f"Instance {new_instance_id} did not become healthy in time. Skipping target registration.")
+            logger.warning(f"Instance {new_instance_id} failed to become healthy in target group.")
             return None
+
 
 def scale_down(cpu_average, all_running_instances, primary_instances):
     candidates_to_stop = [i for i in all_running_instances if i not in primary_instances]
@@ -254,6 +256,9 @@ def scale_down(cpu_average, all_running_instances, primary_instances):
         ec2.stop_instances(InstanceIds=[instance_to_stop])
         send_alert("SCALE DOWN Triggered", f"Low CPU ({cpu_average:.2f}%). Stopped {instance_to_stop}.")
         publish_scaling_metric("ScaleDown", instance_to_stop)
+        # Publish running instances metric immediately after scale-down
+        all_running_instances, _ = get_running_instances()
+        publish_running_instances_metric(len(all_running_instances))
     else:
         logger.info("No non-primary instances to stop. Skipping.")
         send_alert("SCALE DOWN Skipped", "Only primary instances are running.")
@@ -320,27 +325,6 @@ def update_dashboard(instance_ids):
     }
     widgets.append(avg_widget)
 
-    # ELB Request Count widget
-    elb_widget = {
-        "type": "metric",
-        "x": 0,
-        "y": y + height * 2,
-        "width": 12,
-        "height": 6,
-        "properties": {
-            "title": "ELB Request Count",
-            "region": region,
-            "metrics": [
-                ["AWS/ApplicationELB", "RequestCount", "TargetGroup", target_group_arn.split(":")[-1], "LoadBalancer", load_balancer_name]
-            ],
-            "stat": "Sum",
-            "period": 60,
-            "view": "timeSeries",
-            "yAxis": {"left": {"min": 0}}
-        }
-    }
-    widgets.append(elb_widget)
-
     # Scaling Events widget
     scaling_events_widget = {
         "type": "metric",
@@ -350,8 +334,8 @@ def update_dashboard(instance_ids):
         "height": 6,
         "properties": {
             "metrics": [
-                ["AutoScalingProject", "ScalingEvent", "Action", "ScaleUp"],
-                ["AutoScalingProject", "ScalingEvent", "Action", "ScaleDown"]
+                ["AutoScalingMonitoring", "ScalingEvent", "Action", "ScaleUp"],
+                ["AutoScalingMonitoring", "ScalingEvent", "Action", "ScaleDown"]
             ],
             "title": "Scaling Events (Count)",
             "region": region,
@@ -373,7 +357,7 @@ def update_dashboard(instance_ids):
         "height": 6,
         "properties": {
             "metrics": [
-                ["AutoScalingProject", "RunningInstances"]
+                ["AutoScalingMonitoring", "RunningInstances"]
             ],
             "title": "Number of Running Instances",
             "region": region,
@@ -393,7 +377,7 @@ def update_dashboard(instance_ids):
         DashboardName='AutoScalingMonitoring',
         DashboardBody=json.dumps(dashboard_body)
     )
-    logger.info(f"✅ CloudWatch dashboard updated for instances: {instance_ids}")
+    logger.info(f"CloudWatch dashboard updated for instances: {instance_ids}")
 
 # --- Main run logic ---
 def main():
@@ -418,24 +402,32 @@ def main():
     overall_avg_cpu = sum(cpu_per_instance.values()) / len(cpu_per_instance)
     logger.info(f"Overall average CPU utilization: {overall_avg_cpu:.2f}%")
 
-    threshold_high = 70
-    threshold_low = 30
+    threshold_high = 0.4
+    threshold_low = 0
 
+    # If CPU utilization is high, scale up
+    new_instance_id = None
     if overall_avg_cpu > threshold_high:
         new_instance_id = scale_up(overall_avg_cpu)
         if new_instance_id:
             cpu_per_instance[new_instance_id] = 0.0
+            all_running_instances.append(new_instance_id)  # Add new instance to the list
+
+    # If CPU utilization is low, scale down
     elif overall_avg_cpu < threshold_low:
         scale_down(overall_avg_cpu, all_running_instances, primary_instances)
+
     else:
         logger.info("NO SCALING – CPU usage within acceptable range.")
 
-healthy_instance_ids = get_healthy_instance_ids(target_group_arn)
+    # Now, update the dashboard with all instances (new and existing)
+    healthy_instance_ids = get_healthy_instance_ids(target_group_arn)
 
-if not healthy_instance_ids:
-    logger.warning("⚠️ No healthy instances found in target group.")
+    if not healthy_instance_ids:
+        logger.warning("⚠️ No healthy instances found in target group.")
 
-update_dashboard(healthy_instance_ids)  # always update dashboard
+    # Update the dashboard after scaling (with the latest state of healthy instances)
+    update_dashboard(healthy_instance_ids)  # always update dashboard after scaling
 
 if __name__ == "__main__":
     main()
