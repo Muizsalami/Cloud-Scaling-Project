@@ -366,8 +366,8 @@ def main():
     overall_avg_cpu = sum(cpu_per_instance.values()) / len(cpu_per_instance)
     logger.info(f"Overall average CPU utilization: {overall_avg_cpu:.2f}%")
 
-    threshold_high = 0.2
-    threshold_low = 0
+    threshold_high = 70
+    threshold_low = 30
 
     # If CPU utilization is high, scale up
     new_instance_id = None
