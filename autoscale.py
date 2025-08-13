@@ -39,6 +39,10 @@ elbv2 = boto3.client('elbv2', region_name=region)
 def send_alert(subject, message):
     sns.publish(TopicArn=sns_topic_arn, Subject=subject, Message=message)
 
+def health_check_failure_alert(instance_id):
+    logger.warning(f"Instance {instance_id} failed health checks")
+    send_alert("Health Check Failure", f"Instance {instance_id} failed to become healthy in the target group.")
+
 def wait_for_instance_ok(instance_id, timeout=300, interval=15):
     """Wait for instance status to be 'ok' and running"""
     logger.info(f"Waiting for instance {instance_id} to be running and status OK...")
@@ -128,7 +132,6 @@ def publish_running_instances_metric(count):
 
 def scale_up(cpu_average):
     logger.info("SCALE UP triggered. Checking for stopped instances.")
-    send_alert("SCALE UP Triggered", f"High CPU ({cpu_average:.2f}%).")
 
     stopped_response = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['stopped']}])
     stopped_instances = [i['InstanceId'] for r in stopped_response['Reservations'] for i in r['Instances']]
@@ -198,6 +201,7 @@ nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > /home/ubuntu/flaskapp.l
             # Publish running instances metric immediately after scale-up
             all_running_instances, _ = get_running_instances()
             publish_running_instances_metric(len(all_running_instances))
+            send_alert("SCALE UP Triggered", f"High CPU ({cpu_average:.2f}%).")
             return to_start
         else:
             logger.warning(f"Instance {to_start} failed to become healthy in target group.")
@@ -230,9 +234,11 @@ nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > /home/ubuntu/flaskapp.l
             logger.info(f"Instance {new_instance_id} is healthy and ready.")
             all_running_instances, _ = get_running_instances()
             publish_running_instances_metric(len(all_running_instances))
+            send_alert("SCALE UP Triggered", f"High CPU ({cpu_average:.2f}%).")
             return new_instance_id
         else:
             logger.warning(f"Instance {new_instance_id} failed to become healthy in target group.")
+            health_check_failure_alert(new_instance_id)
             return None
 
 def scale_down(cpu_average, all_running_instances, primary_instances):
@@ -242,10 +248,10 @@ def scale_down(cpu_average, all_running_instances, primary_instances):
         logger.info(f"SCALE DOWN: Stopping {instance_to_stop}")
         elbv2.deregister_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': instance_to_stop, 'Port': 80}])
         ec2.stop_instances(InstanceIds=[instance_to_stop])
-        send_alert("SCALE DOWN Triggered", f"Low CPU ({cpu_average:.2f}%). Stopped {instance_to_stop}.")
         # Publish running instances metric immediately after scale-down
         all_running_instances, _ = get_running_instances()
         publish_running_instances_metric(len(all_running_instances))
+        send_alert("SCALE DOWN Triggered", f"Low CPU ({cpu_average:.2f}%). Stopped {instance_to_stop}.")
     else:
         logger.info("No non-primary instances to stop. Skipping.")
         send_alert("SCALE DOWN Skipped", "Only primary instances are running.")
@@ -294,7 +300,7 @@ def update_dashboard(instance_ids):
         "type": "metric",
         "x": 0,
         "y": y + height,
-        "width": 24,
+        "width": 12,
         "height": height,
         "properties": {
             "metrics": [
@@ -312,12 +318,33 @@ def update_dashboard(instance_ids):
     }
     widgets.append(avg_widget)
 
+    # ELB Request Count widget
+    elb_widget = {
+        "type": "metric",
+        "x": 0,
+        "y": y + height * 2,
+        "width": 6,
+        "height": 6,
+        "properties": {
+            "title": "ELB Request Count",
+            "region": region,
+            "metrics": [
+                ["AWS/ApplicationELB", "RequestCount", "TargetGroup", target_group_arn.split(":")[-1], "LoadBalancer", load_balancer_name]
+            ],
+            "stat": "Sum",
+            "period": 60,
+            "view": "timeSeries",
+            "yAxis": {"left": {"min": 0}}
+        }
+    }
+    widgets.append(elb_widget)
+
     # Running Instances Count widget
     running_instances_widget = {
         "type": "metric",
-        "x": 12,
+        "x": 0,
         "y": y + height * 3,
-        "width": 12,
+        "width": 6,
         "height": 6,
         "properties": {
             "metrics": [

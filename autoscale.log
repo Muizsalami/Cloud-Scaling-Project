@@ -1,0 +1,64 @@
+2025-08-03 16:30:11 - INFO - Found credentials in shared credentials file: ~/.aws/credentials
+2025-08-03 16:30:20 - INFO - All running instances: ['i-0851a236955f56eb9']
+2025-08-03 16:30:20 - INFO - Primary (protected) instances: ['i-0851a236955f56eb9']
+2025-08-03 16:30:20 - INFO - Published running instances count: 1
+2025-08-03 16:30:21 - INFO - Instance i-0851a236955f56eb9 - Timestamp (UK): 2025-08-03 16:25:00, Avg CPU: 6.03%
+2025-08-03 16:30:21 - INFO - Overall average CPU utilization: 6.03%
+2025-08-03 16:30:21 - INFO - No non-primary instances to stop. Skipping.
+2025-08-03 16:30:22 - INFO - CloudWatch dashboard updated for instances: ['i-0851a236955f56eb9']
+2025-08-03 16:33:05 - INFO - Found credentials in shared credentials file: ~/.aws/credentials
+2025-08-03 16:33:12 - INFO - All running instances: ['i-0851a236955f56eb9']
+2025-08-03 16:33:12 - INFO - Primary (protected) instances: ['i-0851a236955f56eb9']
+2025-08-03 16:33:12 - INFO - Published running instances count: 1
+2025-08-03 16:33:12 - INFO - Instance i-0851a236955f56eb9 - Timestamp (UK): 2025-08-03 16:30:00, Avg CPU: 11.02%
+2025-08-03 16:33:12 - INFO - Overall average CPU utilization: 11.02%
+2025-08-03 16:33:12 - INFO - No non-primary instances to stop. Skipping.
+2025-08-03 16:33:13 - INFO - CloudWatch dashboard updated for instances: ['i-0851a236955f56eb9']
+2025-08-03 16:54:06 - INFO - Found credentials in shared credentials file: ~/.aws/credentials
+2025-08-03 16:54:13 - INFO - All running instances: ['i-0851a236955f56eb9']
+2025-08-03 16:54:13 - INFO - Primary (protected) instances: ['i-0851a236955f56eb9']
+2025-08-03 16:54:13 - INFO - Published running instances count: 1
+2025-08-03 16:54:13 - INFO - Instance i-0851a236955f56eb9 - Timestamp (UK): 2025-08-03 16:50:00, Avg CPU: 0.50%
+2025-08-03 16:54:13 - INFO - Overall average CPU utilization: 0.50%
+2025-08-03 16:54:13 - INFO - No non-primary instances to stop. Skipping.
+2025-08-03 16:54:14 - INFO - CloudWatch dashboard updated for instances: ['i-0851a236955f56eb9']
+2025-08-03 16:57:07 - INFO - Found credentials in shared credentials file: ~/.aws/credentials
+2025-08-03 16:57:16 - INFO - All running instances: ['i-0851a236955f56eb9']
+2025-08-03 16:57:16 - INFO - Primary (protected) instances: ['i-0851a236955f56eb9']
+2025-08-03 16:57:16 - INFO - Published running instances count: 1
+2025-08-03 16:57:16 - INFO - Instance i-0851a236955f56eb9 - Timestamp (UK): 2025-08-03 16:55:00, Avg CPU: 11.45%
+2025-08-03 16:57:16 - INFO - Overall average CPU utilization: 11.45%
+2025-08-03 16:57:16 - INFO - No non-primary instances to stop. Skipping.
+2025-08-03 16:57:17 - INFO - CloudWatch dashboard updated for instances: ['i-0851a236955f56eb9']
+2025-08-03 17:00:06 - INFO - Found credentials in shared credentials file: ~/.aws/credentials
+2025-08-03 17:00:12 - INFO - All running instances: ['i-0851a236955f56eb9']
+2025-08-03 17:00:12 - INFO - Primary (protected) instances: ['i-0851a236955f56eb9']
+2025-08-03 17:00:13 - INFO - Published running instances count: 1
+2025-08-03 17:00:13 - INFO - Instance i-0851a236955f56eb9 - Timestamp (UK): 2025-08-03 16:55:00, Avg CPU: 21.13%
+2025-08-03 17:00:13 - INFO - Overall average CPU utilization: 21.13%
+2025-08-03 17:00:13 - INFO - No non-primary instances to stop. Skipping.
+2025-08-03 17:00:14 - INFO - CloudWatch dashboard updated for instances: ['i-0851a236955f56eb9']
+2025-08-03 17:45:08 - INFO - Found credentials in shared credentials file: ~/.aws/credentials
+2025-08-03 17:45:18 - INFO - All running instances: ['i-0851a236955f56eb9']
+2025-08-03 17:45:18 - INFO - Primary (protected) instances: ['i-0851a236955f56eb9']
+2025-08-03 17:45:18 - INFO - Published running instances count: 1
+2025-08-03 17:45:18 - INFO - Instance i-0851a236955f56eb9 - Timestamp (UK): 2025-08-03 17:40:00, Avg CPU: 24.87%
+2025-08-03 17:45:18 - INFO - Overall average CPU utilization: 24.87%
+2025-08-03 17:45:18 - INFO - No non-primary instances to stop. Skipping.
+2025-08-03 17:45:19 - INFO - CloudWatch dashboard updated for instances: ['i-0851a236955f56eb9']
+2025-08-03 17:48:07 - INFO - Found credentials in shared credentials file: ~/.aws/credentials
+2025-08-03 17:48:16 - INFO - All running instances: ['i-0851a236955f56eb9']
+2025-08-03 17:48:16 - INFO - Primary (protected) instances: ['i-0851a236955f56eb9']
+2025-08-03 17:48:16 - INFO - Published running instances count: 1
+2025-08-03 17:48:16 - INFO - Instance i-0851a236955f56eb9 - Timestamp (UK): 2025-08-03 17:45:00, Avg CPU: 69.75%
+2025-08-03 17:48:16 - INFO - Overall average CPU utilization: 69.75%
+2025-08-03 17:48:16 - INFO - NO SCALING – CPU usage within acceptable range.
+2025-08-03 17:48:17 - INFO - CloudWatch dashboard updated for instances: ['i-0851a236955f56eb9']
+2025-08-03 17:51:07 - INFO - Found credentials in shared credentials file: ~/.aws/credentials
+2025-08-03 17:51:17 - INFO - All running instances: ['i-0851a236955f56eb9']
+2025-08-03 17:51:17 - INFO - Primary (protected) instances: ['i-0851a236955f56eb9']
+2025-08-03 17:51:17 - INFO - Published running instances count: 1
+2025-08-03 17:51:17 - INFO - No CPU data for instance i-0851a236955f56eb9. Assuming 0%.
+2025-08-03 17:51:17 - INFO - Overall average CPU utilization: 0.00%
+2025-08-03 17:51:17 - INFO - No non-primary instances to stop. Skipping.
+2025-08-03 17:51:19 - INFO - CloudWatch dashboard updated for instances: ['i-0851a236955f56eb9']
