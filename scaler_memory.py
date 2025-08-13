@@ -75,5 +75,6 @@ if datapoints:
         print("Decision: SCALE DOWN – memory usage is low. (Scaling down logic not yet implemented.)")
     else:
         print("Decision: NO SCALING – memory usage is within acceptable range.")
+        
 else:
     print("No datapoints available to make scaling decision.")
