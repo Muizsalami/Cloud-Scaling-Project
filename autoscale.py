@@ -6,6 +6,7 @@ import json
 import logging
 
 # --- Logging setup ---
+# Configure structured logging to track script execution with timestamps and log levels
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -14,21 +15,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Configuration ---
+# AWS resource configurations and identifiers
 region = 'eu-north-1'
 sns_topic_arn = 'arn:aws:sns:eu-north-1:135699253595:ScalingAlerts'
 load_balancer_name = 'app/ScalerALB/1136bc260d6235a6'
 
+# EC2 instance parameters
 ami_id = 'ami-0c1ac8a41498c1a9c'
 instance_type = 't3.micro'
 security_group_id = 'sg-0457955da20e50a9e'
 key_name = 'salamikey'
 target_group_arn = 'arn:aws:elasticloadbalancing:eu-north-1:135699253595:targetgroup/TG1/2b00c3a319ad7c42'
 
+# Tag for identifying primary (non-scalable) instance
 primary_tag_key = 'Role'
 primary_tag_value = 'Primary'
 
+# Timezone setting for UK-localized logs
 uk_tz = pytz.timezone("Europe/London")
 
+# Initialize AWS service clients
 cloudwatch = boto3.client('cloudwatch', region_name=region)
 ec2 = boto3.client('ec2', region_name=region)
 sns = boto3.client('sns', region_name=region)
@@ -37,14 +43,16 @@ elbv2 = boto3.client('elbv2', region_name=region)
 # --- Functions ---
 
 def send_alert(subject, message):
+    # Send an SNS notification to the configured topic.
     sns.publish(TopicArn=sns_topic_arn, Subject=subject, Message=message)
 
 def health_check_failure_alert(instance_id):
+    # Send an alert when a new instance fails health checks in the target group.
     logger.warning(f"Instance {instance_id} failed health checks")
     send_alert("Health Check Failure", f"Instance {instance_id} failed to become healthy in the target group.")
 
 def wait_for_instance_ok(instance_id, timeout=300, interval=15):
-    """Wait for instance status to be 'ok' and running"""
+    # Wait until an EC2 instance is in 'running' state and passes both system and instance status checks.
     logger.info(f"Waiting for instance {instance_id} to be running and status OK...")
     waiter = ec2.get_waiter('instance_running')
     try:
@@ -53,6 +61,7 @@ def wait_for_instance_ok(instance_id, timeout=300, interval=15):
         logger.error(f"Error waiting for instance to run: {e}")
         return False
 
+    # Check health status repeatedly until timeout
     for _ in range(int(timeout/interval)):
         statuses = ec2.describe_instance_status(InstanceIds=[instance_id])
         if statuses['InstanceStatuses']:
@@ -68,7 +77,7 @@ def wait_for_instance_ok(instance_id, timeout=300, interval=15):
     return False
 
 def wait_for_target_healthy(target_group_arn, instance_id, timeout=300, interval=15):
-    """Wait for an instance to show as healthy in the target group"""
+    # Wait for an instance to register as 'healthy' in the specified target group.
     logger.info(f"Waiting for instance {instance_id} to become healthy in target group...")
     elapsed = 0
     while elapsed < timeout:
@@ -85,6 +94,7 @@ def wait_for_target_healthy(target_group_arn, instance_id, timeout=300, interval
     return False
 
 def get_running_instances():
+    #Retrieve all running instances and identify the primary (non-scalable) ones based on tags.
     response = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
     all_running_instances = []
     primary_instances = []
@@ -99,6 +109,10 @@ def get_running_instances():
     return all_running_instances, primary_instances
 
 def get_cpu_utilization(instance_id, start_time, end_time):
+    """
+    Retrieve average CPU utilization for a given instance over a time period.
+    Returns 0% if no datapoints are available.
+    """
     metrics = cloudwatch.get_metric_statistics(
         Namespace='AWS/EC2',
         MetricName='CPUUtilization',
@@ -119,6 +133,7 @@ def get_cpu_utilization(instance_id, start_time, end_time):
         return 0.0
 
 def publish_running_instances_metric(count):
+    #Publish the count of currently running instances to a custom CloudWatch metric.
     cloudwatch.put_metric_data(
         Namespace='AutoScalingMonitoring',
         MetricData=[{
@@ -131,11 +146,17 @@ def publish_running_instances_metric(count):
     logger.info(f"Published running instances count: {count}")
 
 def scale_up(cpu_average):
+    """
+    Scale up by starting a stopped instance if available, otherwise launch a new instance.
+    Registers the instance to the target group and waits for health checks.
+    """
     logger.info("SCALE UP triggered. Checking for stopped instances.")
 
+    # Check for any stopped instances that can be restarted
     stopped_response = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['stopped']}])
     stopped_instances = [i['InstanceId'] for r in stopped_response['Reservations'] for i in r['Instances']]
 
+    # User data to bootstrap new instance with Flask app for load simulation
     user_data_script = '''#!/bin/bash
 cd /home/ubuntu
 apt update -y
@@ -186,6 +207,7 @@ nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > /home/ubuntu/flaskapp.l
 '''
 
     if stopped_instances:
+        # Start the first stopped instance found
         to_start = stopped_instances[0]
         logger.info(f"Starting stopped instance: {to_start}")
         ec2.start_instances(InstanceIds=[to_start])
@@ -193,6 +215,7 @@ nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > /home/ubuntu/flaskapp.l
         logger.info(f"Waiting for 45 seconds for instance {to_start} to initialize...")
         time.sleep(45)
 
+        # Register the instance with the target group
         elbv2.register_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': to_start, 'Port': 80}])
         logger.info(f"Registered {to_start} with target group.")
 
@@ -207,6 +230,7 @@ nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > /home/ubuntu/flaskapp.l
             logger.warning(f"Instance {to_start} failed to become healthy in target group.")
             return None
     else:
+        # Launch a brand-new instance if none are stopped
         logger.info("No stopped instances found. Launching new instance.")
         response = ec2.run_instances(
             ImageId=ami_id,
@@ -227,6 +251,7 @@ nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > /home/ubuntu/flaskapp.l
         logger.info(f"Waiting for 45 seconds for instance {new_instance_id} to initialize...")
         time.sleep(45)
 
+        # Register new instance in the target group
         elbv2.register_targets(TargetGroupArn=target_group_arn, Targets=[{'Id': new_instance_id, 'Port': 80}])
         logger.info(f"Registered {new_instance_id} with target group.")
 
@@ -242,6 +267,7 @@ nohup /home/ubuntu/venv/bin/python /home/ubuntu/app.py > /home/ubuntu/flaskapp.l
             return None
 
 def scale_down(cpu_average, all_running_instances, primary_instances):
+    # Scale down by stopping the most recently added non-primary instance.
     candidates_to_stop = [i for i in all_running_instances if i not in primary_instances]
     if candidates_to_stop:
         instance_to_stop = candidates_to_stop[-1]
@@ -257,6 +283,7 @@ def scale_down(cpu_average, all_running_instances, primary_instances):
         send_alert("SCALE DOWN Skipped", "Only primary instances are running.")
 
 def get_healthy_instance_ids(target_group_arn):
+    # Get IDs of all healthy instances in the target group.
     response = elbv2.describe_target_health(TargetGroupArn=target_group_arn)
     healthy_ids = [
         target['Target']['Id']
@@ -266,6 +293,13 @@ def get_healthy_instance_ids(target_group_arn):
     return healthy_ids
 
 def update_dashboard(instance_ids):
+    """
+    Dynamically update a CloudWatch dashboard with metrics for:
+    - CPU per instance
+    - Overall CPU usage
+    - ELB Request Count
+    - Running Instances count
+    """
     widgets = []
     width = 6
     height = 6
@@ -372,6 +406,13 @@ def update_dashboard(instance_ids):
 
 # --- Main run logic ---
 def main():
+    """
+    Main autoscaling control loop:
+    - Retrieves CPU metrics
+    - Compares against thresholds
+    - Triggers scale up or down actions
+    - Updates monitoring dashboard
+    """
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(minutes=5)
 
