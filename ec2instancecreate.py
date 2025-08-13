@@ -18,4 +18,5 @@ response = ec2.run_instances(
 )
 
 instance_id = response['Instances'][0]['InstanceId']
+
 print(f"Launched instance: {instance_id}")
